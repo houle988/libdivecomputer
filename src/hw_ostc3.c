@@ -325,7 +325,7 @@ hw_ostc3_transfer (hw_ostc3_device_t *device,
 
 			dc_iostream_sleep (device->iostream, 10);
 
-			// Send the reamainder of the input data packet.
+			// Send the remainder of the input data packet.
 			status = hw_ostc3_write (device, progress, input + 1, isize - 1);
 			if (status != DC_STATUS_SUCCESS) {
 				ERROR (abstract->context, "Failed to send the data packet.");
@@ -1498,7 +1498,7 @@ hw_ostc3_device_fwupdate3 (dc_device_t *abstract, const char *filename)
 
 	rc = hw_ostc3_firmware_upgrade (abstract, firmware->checksum);
 	if (rc != DC_STATUS_SUCCESS) {
-		ERROR (context, "Failed to start programing");
+		ERROR (context, "Failed to start programming");
 		free (firmware);
 		return rc;
 	}
