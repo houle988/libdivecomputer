@@ -61,6 +61,7 @@
 #define S_BLOCK_WRITE 0x30
 #define S_BLOCK_WRITE2 0x31
 #define S_ERASE    0x42
+#define S_KEY      0x4B
 #define S_READY    0x4C
 #define READY      0x4D
 #define S_UPGRADE  0x50
@@ -523,9 +524,9 @@ hw_ostc3_device_init_service (hw_ostc3_device_t *device)
 	}
 
 	// Verify the response to service mode.
-	if (answer[0] != 0x4B || answer[1] != 0xAB ||
-			answer[2] != 0xCD || answer[3] != 0xEF ||
-			answer[4] != S_READY) {
+	if (answer[0] != S_KEY ||
+		memcmp (answer + 1, command + 1, sizeof(command) - 1) != 0 ||
+		answer[4] != S_READY) {
 		ERROR (abstract->context, "Failed to verify the answer.");
 		return DC_STATUS_PROTOCOL;
 	}
