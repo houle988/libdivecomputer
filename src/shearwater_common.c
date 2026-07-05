@@ -28,7 +28,19 @@
 #include "platform.h"
 #include "array.h"
 
-#define SZ_PACKET  254
+// Protocol variants.
+#define V1 1
+#define V2 2
+
+// Maximum packet payload size.
+// The V1 protocol uses an 8 bit length field, while the V2 protocol
+// uses a 16 bit length field. Theoretically the V2 maximum size is
+// 2^16-1 bytes, but the largest observed value is much smaller (0x0202
+// for the manifest and 0x0902 for the dive). Allow for an extra margin
+// for future expansions.
+#define SZ_PACKET_V1  254
+#define SZ_PACKET_V2  4096
+#define SZ_PACKET_MAX SZ_PACKET_V2
 
 // SLIP special character codes
 #define END       0xC0
@@ -54,7 +66,7 @@
 #define NAK 0x7F
 
 dc_status_t
-shearwater_common_setup (shearwater_common_device_t *device, dc_context_t *context, dc_iostream_t *iostream)
+shearwater_common_setup (shearwater_common_device_t *device, dc_context_t *context, dc_iostream_t *iostream, unsigned int model)
 {
 	dc_status_t status = DC_STATUS_SUCCESS;
 
@@ -77,6 +89,8 @@ shearwater_common_setup (shearwater_common_device_t *device, dc_context_t *conte
 	// Make sure everything is in a sane state.
 	dc_iostream_sleep (device->iostream, 300);
 	dc_iostream_purge (device->iostream, DC_DIRECTION_ALL);
+
+	device->protocol = (model == PERDIX3) ? V2 : V1;
 
 	return DC_STATUS_SUCCESS;
 }
@@ -145,10 +159,11 @@ shearwater_common_slip_write (shearwater_common_device_t *device, const unsigned
 {
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_transport_t transport = dc_iostream_get_transport(device->iostream);
+	const unsigned int header = transport == DC_TRANSPORT_BLE && device->protocol != V2;
 	unsigned char buffer[32];
 	unsigned int nbytes = 0;
 
-	if (transport == DC_TRANSPORT_BLE) {
+	if (header) {
 		// Calculate the total number of bytes.
 		unsigned int count = 1;
 		for (unsigned int i = 0; i < size; ++i) {
@@ -183,7 +198,7 @@ shearwater_common_slip_write (shearwater_common_device_t *device, const unsigned
 					return status;
 				}
 
-				if (transport == DC_TRANSPORT_BLE) {
+				if (header) {
 					buffer[1]++;
 					nbytes = 2;
 				} else {
@@ -210,7 +225,7 @@ shearwater_common_slip_write (shearwater_common_device_t *device, const unsigned
 				return status;
 			}
 
-			if (transport == DC_TRANSPORT_BLE) {
+			if (header) {
 				buffer[1]++;
 				nbytes = 2;
 			} else {
@@ -238,6 +253,7 @@ shearwater_common_slip_read (shearwater_common_device_t *device, unsigned char d
 {
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_transport_t transport = dc_iostream_get_transport(device->iostream);
+	const unsigned int header = transport == DC_TRANSPORT_BLE && device->protocol != V2;
 	unsigned char buffer[256];
 	unsigned int escaped = 0;
 	unsigned int nbytes = 0;
@@ -258,7 +274,7 @@ shearwater_common_slip_read (shearwater_common_device_t *device, unsigned char d
 		}
 
 		size_t offset = 0;
-		if (transport == DC_TRANSPORT_BLE) {
+		if (header) {
 			if (transferred < 2) {
 				ERROR (device->base.context, "Invalid packet length (" DC_PRINTF_SIZE ").", transferred);
 				return DC_STATUS_PROTOCOL;
@@ -339,10 +355,12 @@ shearwater_common_transfer (shearwater_common_device_t *device, const unsigned c
 {
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_device_t *abstract = (dc_device_t *) device;
-	unsigned char packet[SZ_PACKET + 4];
+	const unsigned int maxpacket = (device->protocol == V2) ? SZ_PACKET_V2 : SZ_PACKET_V1;
+	const unsigned int headerlen = (device->protocol == V2) ? 5 : 4;
+	unsigned char packet[SZ_PACKET_MAX + 5];
 	unsigned int n = 0;
 
-	if (isize > SZ_PACKET || osize > SZ_PACKET)
+	if (isize > maxpacket || osize > maxpacket)
 		return DC_STATUS_INVALIDARGS;
 
 	if (device_is_cancelled (abstract))
@@ -351,12 +369,19 @@ shearwater_common_transfer (shearwater_common_device_t *device, const unsigned c
 	// Setup the request packet.
 	packet[0] = 0xFF;
 	packet[1] = 0x01;
-	packet[2] = isize + 1;
-	packet[3] = 0x00;
-	memcpy (packet + 4, input, isize);
+	if (device->protocol == V2) {
+		// FF 01 00 [len_hi] [len_lo] <payload>
+		packet[2] = 0x00;
+		array_uint16_be_set (packet + 3, isize);
+	} else {
+		// FF 01 [len+1] 00 <payload>
+		packet[2] = isize + 1;
+		packet[3] = 0x00;
+	}
+	memcpy (packet + headerlen, input, isize);
 
 	// Send the request packet.
-	status = shearwater_common_slip_write (device, packet, isize + 4);
+	status = shearwater_common_slip_write (device, packet, isize + headerlen);
 	if (status != DC_STATUS_SUCCESS) {
 		ERROR (abstract->context, "Failed to send the request packet.");
 		return status;
@@ -377,21 +402,33 @@ shearwater_common_transfer (shearwater_common_device_t *device, const unsigned c
 	}
 
 	// Validate the packet header.
-	if (n < 4 || packet[0] != 0x01 || packet[1] != 0xFF || packet[3] != 0x00) {
+	unsigned int idx = (device->protocol == V2) ? 2 : 3;
+	if (n < headerlen || packet[0] != 0x01 || packet[1] != 0xFF || packet[idx] != 0x00) {
 		ERROR (abstract->context, "Invalid packet header.");
 		return DC_STATUS_PROTOCOL;
 	}
 
 	// Validate the packet length.
-	unsigned int length = packet[2];
-	if (length < 1 || length - 1 + 4 != n || length - 1 > osize) {
+	unsigned int length = 0;
+	if (device->protocol == V2) {
+		length = array_uint16_be (packet + 3);
+	} else {
+		length = packet[2];
+		if (length < 1) {
+			ERROR (abstract->context, "Invalid packet header.");
+			return DC_STATUS_PROTOCOL;
+		}
+
+		length -= 1;
+	}
+	if (length + headerlen != n || length > osize) {
 		ERROR (abstract->context, "Invalid packet header.");
 		return DC_STATUS_PROTOCOL;
 	}
 
-	memcpy (output, packet + 4, length - 1);
+	memcpy (output, packet + headerlen, length);
 	if (actual)
-		*actual = length - 1;
+		*actual = length;
 
 	return DC_STATUS_SUCCESS;
 }
@@ -402,6 +439,8 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 {
 	dc_device_t *abstract = (dc_device_t *) device;
 	dc_status_t rc = DC_STATUS_SUCCESS;
+	const unsigned int maxpacket = (device->protocol == V2) ? SZ_PACKET_V2 : SZ_PACKET_V1;
+	unsigned char response[SZ_PACKET_MAX];
 	unsigned int n = 0;
 
 	unsigned char req_init[] = {
@@ -415,9 +454,10 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 		(size >> 16) & 0xFF,
 		(size >>  8) & 0xFF,
 		(size      ) & 0xFF};
-	unsigned char req_block[] = {UPLOAD_DATA_REQUEST, 0x00};
+	unsigned char req_block[] = {UPLOAD_DATA_REQUEST, 0x00, 0x00};
 	unsigned char req_quit[] = {UPLOAD_EXIT_REQUEST};
-	unsigned char response[SZ_PACKET];
+	unsigned int req_block_len = (device->protocol == V2) ?
+		sizeof(req_block) : sizeof(req_block) - 1;
 
 	// Erase the current contents of the buffer.
 	if (!dc_buffer_clear (buffer)) {
@@ -433,7 +473,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	}
 
 	// Transfer the init request.
-	rc = shearwater_common_transfer (device, req_init, sizeof (req_init), response, sizeof(response), &n);
+	rc = shearwater_common_transfer (device, req_init, sizeof (req_init), response, maxpacket, &n);
 	if (rc != DC_STATUS_SUCCESS) {
 		return rc;
 	}
@@ -453,7 +493,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 
 	// Verify the maximum packet length.
 	unsigned int maxlength = array_uint_be (response + 2, len);
-	if (maxlength > SZ_PACKET) {
+	if (maxlength > maxpacket) {
 		ERROR (abstract->context, "Unexpected response packet.");
 		return DC_STATUS_PROTOCOL;
 	}
@@ -471,7 +511,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	while (nbytes < size && !done) {
 		// Transfer the block request.
 		req_block[1] = block;
-		rc = shearwater_common_transfer (device, req_block, sizeof (req_block), response, sizeof (response), &n);
+		rc = shearwater_common_transfer (device, req_block, req_block_len, response, maxpacket, &n);
 		if (rc != DC_STATUS_SUCCESS) {
 			return rc;
 		}
@@ -520,7 +560,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	}
 
 	// Transfer the quit request.
-	rc = shearwater_common_transfer (device, req_quit, sizeof (req_quit), response, 2, &n);
+	rc = shearwater_common_transfer (device, req_quit, sizeof (req_quit), response, maxpacket, &n);
 	if (rc != DC_STATUS_SUCCESS) {
 		return rc;
 	}
@@ -547,6 +587,8 @@ shearwater_common_rdbi (shearwater_common_device_t *device, unsigned int id, uns
 {
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_device_t *abstract = (dc_device_t *) device;
+	const unsigned int maxpacket = (device->protocol == V2) ? SZ_PACKET_V2 : SZ_PACKET_V1;
+	unsigned char response[SZ_PACKET_MAX];
 
 	// Transfer the request.
 	unsigned int n = 0;
@@ -554,8 +596,7 @@ shearwater_common_rdbi (shearwater_common_device_t *device, unsigned int id, uns
 		RDBI_REQUEST,
 		(id >> 8) & 0xFF,
 		(id     ) & 0xFF};
-	unsigned char response[SZ_PACKET];
-	status = shearwater_common_transfer (device, request, sizeof (request), response, sizeof (response), &n);
+	status = shearwater_common_transfer (device, request, sizeof (request), response, maxpacket, &n);
 	if (status != DC_STATUS_SUCCESS) {
 		return status;
 	}
@@ -600,22 +641,23 @@ shearwater_common_wdbi (shearwater_common_device_t *device, unsigned int id, con
 {
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_device_t *abstract = (dc_device_t *) device;
+	const unsigned int maxpacket = (device->protocol == V2) ? SZ_PACKET_V2 : SZ_PACKET_V1;
+	unsigned char response[SZ_PACKET_MAX];
 
-	if (size + 3 > SZ_PACKET) {
+	if (size + 3 > maxpacket) {
 		return DC_STATUS_INVALIDARGS;
 	}
 
 	// Transfer the request.
 	unsigned int n = 0;
-	unsigned char request[SZ_PACKET] = {
+	unsigned char request[SZ_PACKET_MAX] = {
 		WDBI_REQUEST,
 		(id >> 8) & 0xFF,
 		(id     ) & 0xFF};
 	if (size) {
 		memcpy (request + 3, data, size);
 	}
-	unsigned char response[SZ_PACKET];
-	status = shearwater_common_transfer (device, request, size + 3, response, sizeof (response), &n);
+	status = shearwater_common_transfer (device, request, size + 3, response, maxpacket, &n);
 	if (status != DC_STATUS_SUCCESS) {
 		return status;
 	}
