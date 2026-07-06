@@ -433,13 +433,27 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	}
 
 	// Transfer the init request.
-	rc = shearwater_common_transfer (device, req_init, sizeof (req_init), response, 3, &n);
+	rc = shearwater_common_transfer (device, req_init, sizeof (req_init), response, sizeof(response), &n);
 	if (rc != DC_STATUS_SUCCESS) {
 		return rc;
 	}
 
 	// Verify the init response.
-	if (n != 3 || response[0] != UPLOAD_INIT_RESPONSE || response[1] != 0x10 || response[2] > SZ_PACKET) {
+	if (n < 2 || response[0] != UPLOAD_INIT_RESPONSE) {
+		ERROR (abstract->context, "Unexpected response packet.");
+		return DC_STATUS_PROTOCOL;
+	}
+
+	// Verify the init response length.
+	unsigned int len = (response[1] & 0xF0) >> 4;
+	if (n < len + 2 || len > 4) {
+		ERROR (abstract->context, "Unexpected response packet.");
+		return DC_STATUS_PROTOCOL;
+	}
+
+	// Verify the maximum packet length.
+	unsigned int maxlength = array_uint_be (response + 2, len);
+	if (maxlength > SZ_PACKET) {
 		ERROR (abstract->context, "Unexpected response packet.");
 		return DC_STATUS_PROTOCOL;
 	}
