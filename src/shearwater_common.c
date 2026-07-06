@@ -42,6 +42,15 @@
 #define WDBI_REQUEST  0x2E
 #define WDBI_RESPONSE 0x6E
 
+#define UPLOAD_INIT_REQUEST  0x35
+#define UPLOAD_INIT_RESPONSE 0x75
+
+#define UPLOAD_DATA_REQUEST  0x36
+#define UPLOAD_DATA_RESPONSE 0x76
+
+#define UPLOAD_EXIT_REQUEST  0x37
+#define UPLOAD_EXIT_RESPONSE 0x77
+
 #define NAK 0x7F
 
 dc_status_t
@@ -396,7 +405,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	unsigned int n = 0;
 
 	unsigned char req_init[] = {
-		0x35,
+		UPLOAD_INIT_REQUEST,
 		(compression ? 0x10 : 0x00),
 		0x34,
 		(address >> 24) & 0xFF,
@@ -406,8 +415,8 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 		(size >> 16) & 0xFF,
 		(size >>  8) & 0xFF,
 		(size      ) & 0xFF};
-	unsigned char req_block[] = {0x36, 0x00};
-	unsigned char req_quit[] = {0x37};
+	unsigned char req_block[] = {UPLOAD_DATA_REQUEST, 0x00};
+	unsigned char req_quit[] = {UPLOAD_EXIT_REQUEST};
 	unsigned char response[SZ_PACKET];
 
 	// Erase the current contents of the buffer.
@@ -430,7 +439,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	}
 
 	// Verify the init response.
-	if (n != 3 || response[0] != 0x75 || response[1] != 0x10 || response[2] > SZ_PACKET) {
+	if (n != 3 || response[0] != UPLOAD_INIT_RESPONSE || response[1] != 0x10 || response[2] > SZ_PACKET) {
 		ERROR (abstract->context, "Unexpected response packet.");
 		return DC_STATUS_PROTOCOL;
 	}
@@ -454,7 +463,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 		}
 
 		// Verify the block header.
-		if (n < 2 || response[0] != 0x76 || response[1] != block) {
+		if (n < 2 || response[0] != UPLOAD_DATA_RESPONSE || response[1] != block) {
 			ERROR (abstract->context, "Unexpected response packet.");
 			return DC_STATUS_PROTOCOL;
 		}
@@ -503,7 +512,7 @@ shearwater_common_download (shearwater_common_device_t *device, dc_buffer_t *buf
 	}
 
 	// Verify the quit response.
-	if (n != 2 || response[0] != 0x77 || response[1] != 0x00) {
+	if (n != 2 || response[0] != UPLOAD_EXIT_RESPONSE || response[1] != 0x00) {
 		ERROR (abstract->context, "Unexpected response packet.");
 		return DC_STATUS_PROTOCOL;
 	}
