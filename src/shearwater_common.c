@@ -28,6 +28,9 @@
 #include "platform.h"
 #include "array.h"
 
+#define BLE_MTU_MIN  20
+#define BLE_MTU_MAX 514
+
 // Protocol variants.
 #define V1 1
 #define V2 2
@@ -160,7 +163,7 @@ shearwater_common_slip_write (shearwater_common_device_t *device, const unsigned
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_transport_t transport = dc_iostream_get_transport(device->iostream);
 	const unsigned int header = transport == DC_TRANSPORT_BLE && device->protocol != V2;
-	unsigned char buffer[32];
+	unsigned char buffer[BLE_MTU_MIN];
 	unsigned int nbytes = 0;
 
 	if (header) {
@@ -254,7 +257,7 @@ shearwater_common_slip_read (shearwater_common_device_t *device, unsigned char d
 	dc_status_t status = DC_STATUS_SUCCESS;
 	dc_transport_t transport = dc_iostream_get_transport(device->iostream);
 	const unsigned int header = transport == DC_TRANSPORT_BLE && device->protocol != V2;
-	unsigned char buffer[256];
+	unsigned char buffer[BLE_MTU_MAX];
 	unsigned int escaped = 0;
 	unsigned int nbytes = 0;
 
